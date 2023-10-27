@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react';
-import axios, { AxiosError } from 'axios';
+import { useState, useCallback, useRef } from 'react';
+import axios, { AxiosError, CancelTokenSource } from 'axios';
 
 export interface Airport {
   city: string;
@@ -31,6 +31,10 @@ function useAirports() {
   const [errorFetchAirport, setErrorFetchAirport] = useState<AxiosError | null>(null);
   const [loading, setLoading] = useState(false);
 
+  const sourceRefs = useRef<CancelTokenSource[]>([]);
+  const cancelRef = useRef<boolean>(false);
+  const lastQueryRef = useRef<string | null>(null);
+
   const fetchAirportsByCountry = useCallback(async (country: string) => {
     try {
       const response = await api.get('', { params: { country } });
@@ -41,25 +45,52 @@ function useAirports() {
     }
   }, []);
 
-  const fetchAirportByName = useCallback(async (name: string, country: string) => {
-    try {
-      const response = await api.get('', { params: { name, country } });
-      return response.data;
-    } catch (err) {
-      setErrorByName(err as AxiosError);
-    }
-  }, []);
+  const fetchAirportByName = useCallback(
+    async (name: string, country: string) => {
+      const source = axios.CancelToken.source();
+      sourceRefs.current.push(source);
+      try {
+        const response = await api.get('', {
+          params: { name, country },
+          cancelToken: source.token
+        });
+        return response.data;
+      } catch (err) {
+        if (!axios.isCancel(err)) {
+          setErrorByName(err as AxiosError);
+        }
+      }
+    },
+    []
+  );
 
-  const fetchAirportByIATA = useCallback(async (iata: string, country: string) => {
-    try {
-      const response = await api.get('', { params: { iata, country } });
-      return response.data;
-    } catch (err) {
-      setErrorByIATA(err as AxiosError);
-    }
-  }, []);
+  const fetchAirportByIATA = useCallback(
+    async (iata: string, country: string) => {
+      const source = axios.CancelToken.source();
+      sourceRefs.current.push(source);
+      try {
+        const response = await api.get('', {
+          params: { iata, country },
+          cancelToken: source.token
+        });
+        return response.data;
+      } catch (err) {
+        if (!axios.isCancel(err)) {
+          setErrorByIATA(err as AxiosError);
+        }
+      }
+    },
+    []
+  );
 
   const fetchAirport = useCallback(async (query: string, country: string) => {
+    if (lastQueryRef.current === query) {
+      return;
+    }
+    lastQueryRef.current = query;
+    sourceRefs.current.forEach(source => source.cancel('Canceled due to new request'));
+    sourceRefs.current = [];
+
     setLoading(true);
     try {
       const requests = [fetchAirportByName(query, country)];
@@ -71,11 +102,16 @@ function useAirports() {
       const combinedResults = Array.from(
         new Set([...(byName || []), ...(byIATA || [])])
       );
-      setSearchResults(combinedResults);
+      if (!cancelRef.current) {
+        setSearchResults(combinedResults);
+      }
     } catch (err) {
-      setErrorFetchAirport(err as AxiosError);
+      if (!axios.isCancel(err)) {
+        setErrorFetchAirport(err as AxiosError);
+      }
     } finally {
       setLoading(false);
+      cancelRef.current = false;
     }
   }, [fetchAirportByName, fetchAirportByIATA]);
 
@@ -95,6 +131,16 @@ function useAirports() {
     [data]
   );
 
+  const resetSearch = useCallback(() => {
+    cancelRef.current = true;
+    if (data) {
+      sourceRefs.current.forEach(source => source.cancel('Canceled due to new request'));
+      sourceRefs.current = [];
+      const oldData = [...data];
+      setSearchResults(oldData);
+    }
+  }, [data]);
+
   return {
     errorByCountry,
     errorByIATA,
@@ -104,7 +150,8 @@ function useAirports() {
     fetchAirportsByCountry,
     fetchAirport,
     localSearch,
-    searchResults
+    searchResults,
+    resetSearch
   };
 }
 
